@@ -1,0 +1,224 @@
+# Paperless-NGX Agent Guide
+
+## Project Overview
+
+Paperless-NGX is a document management system with a **Django 5.2** backend (REST API via DRF) and **Angular 21** frontend. Documents flow through a distributed task queue (Celery + Redis) for OCR, classification, and indexing.
+
+**Key Tech Stack:**
+- Backend: Django + DRF + Celery + PostgreSQL/MySQL/SQLite
+- Frontend: Angular 21 + Bootstrap 5 + RxJS
+- Search: Tantivy (Rust-based full-text indexing)
+- AI: LLaMA Index + embeddings (HuggingFace/OpenAI) + Ollama + FAISS
+- Build: `uv` (Python), `pnpm` (Node)
+
+## Architecture & Data Flow
+
+### Document Consumption Pipeline
+1. **Input**: Files arrive via web UI, IMAP, barcode scanner, or filesystem watcher
+2. **Consumer** (`documents/consumer.py`): Single-threaded manager orchestrating plugins + validation
+3. **Async Tasks** (Celery): Decode, OCR (ocrmypdf), parse (Gotenberg/Tika), extract metadata
+4. **Indexing**: Tantivy full-text + optional vector embeddings (LLaMA Index)
+5. **Classification**: Trained classifier (scikit-learn) suggests tags/correspondents
+6. **Webhooks**: Signed-pickle serialized tasks via Redis broker (see `paperless/celery.py`)
+
+**Key Pattern**: Use Django signals (`documents/signals/handlers.py`) to track async task lifecycle—tasks transition from PENDING → STARTED → SUCCESS/FAILURE. UI polls via WebSocket for status updates.
+
+### Module Organization
+- **`documents/`**: Core models, views (ModelViewSets), serializers, business logic
+  - `models.py`: MatchingModel (fuzzy/regex/literal matching), SearchModel, Document hierarchy
+  - `views.py`: DocumentViewSet + 20+ related ViewSets; heavy use of `@extend_schema` for OpenAPI docs
+  - `consumer.py`: The orchestrator for document intake (runs as separate Django management command)
+  - `tasks.py`: Celery task definitions (`@shared_task` decorated)
+- **`paperless/`**: Project settings, auth, Celery config, custom DRF authentication
+- **`paperless_ai/`**: LLaMA Index integration, embeddings, vector search
+- **`paperless_mail/`**: IMAP account management + mail-to-document workflows
+
+### External Service Integration
+- **Gotenberg** (document conversion): http://localhost:3000/forms/convert/office
+- **Tika** (format detection): http://localhost:9998/tika
+- **Redis**: Task broker + cache backend
+- **Search Backend**: Tantivy (file-based index at `settings.INDEX_DIR`)
+
+## Development Essentials
+
+### Environment Setup
+```bash
+# Python dependencies (from project root)
+uv sync --group dev
+
+# Install pre-commit hooks (catches ruff/linting issues)
+uv run prek install
+
+# Apply migrations (from src/)
+uv run manage.py migrate
+
+# Start Redis (or use docker/scripts/start_services.sh)
+docker run -d -p 6379:6379 redis:latest
+```
+
+### Running Services
+**Backend** (from `src/`):
+```bash
+# Web server (ASGI on port 8000)
+uv run manage.py runserver
+
+# Document consumer (single-threaded orchestrator)
+uv run manage.py document_consumer
+
+# Celery worker (async background tasks)
+uv run celery --app paperless worker -l DEBUG
+
+# Or start all at once: uv run manage.py runserver & uv run manage.py document_consumer & uv run celery --app paperless worker
+```
+
+**Frontend** (from `src-ui/`):
+```bash
+pnpm install
+pnpm ng serve  # Dev server on port 4200
+# or build: pnpm ng build --configuration production
+```
+
+### Testing
+- **Run all**: `pytest` (from `src/`)—auto-generates HTML coverage report
+- **Markers**: Use `pytest -m live` to run only live tests (requires Gotenberg/Tika/nginx)
+  - `live`: Requires external services
+  - `nginx`, `gotenberg`, `tika`, `greenmail`: Specific service tests
+  - `api`: REST API tests
+  - `search`: Tantivy search backend tests
+- **Frontend**: `pnpm test` (Jest + Playwright e2e in `src-ui/e2e/`)
+
+### Code Quality Tools
+- **Formatting**: `ruff format src/` (88-char line length); git pre-commit hooks enforce
+- **Linting**: `ruff check src/` (strict rules configured in `pyproject.toml`)
+- **Type Checking**: mypy (strict mode); run via IDE integration
+- **Codespell**: Catches common typos
+
+## Critical Developer Patterns
+
+### Async Task Tracking & User Feedback
+Celery tasks have custom lifecycle:
+1. **Task Created**: `before_task_publish` signal → creates `PaperlessTask` record (PENDING)
+2. **Task Started**: `task_prerun` signal → updates status to STARTED
+3. **Task Complete**: `task_postrun` or `task_failure` signal → final status + result_data
+
+**Example**: In `documents/views.py`, `TasksViewSet` queries `PaperlessTask` models. Frontend (`src-ui/src/app/components/admin/tasks/`) displays task progress. **Never directly call `.delay()` without understanding signal flow.**
+
+### API Versioning & Schema
+- **Default Version**: 10 (set in settings via `DEFAULT_VERSION`)
+- **Allowed Versions**: ["9", "10"]
+- **Deprecation**: When adding breaking changes, new version goes in `ALLOWED_VERSIONS`; old endpoints redirect
+- **OpenAPI Schema**: Auto-generated by drf-spectacular; use `@extend_schema` to document custom endpoints (see `views.py` for 100+ examples)
+
+### Permissions Model
+- **Global**: Django built-in + guardian (per-object permissions)
+- **Frontend**: `PaperlessObjectPermissions` mixin checks `view_*`, `add_*`, `change_*`, `delete_*`
+- **Filtering**: Custom filter backends in `documents/filters.py` (e.g., `OwnerFilter`, `PermissionsFilter`)
+- **Owner-Aware**: Many models have optional `owner` ForeignKey; users see docs they own or have explicit grants
+
+### Plugin System
+Consumer uses extensible plugin pattern:
+```python
+# In documents/consumer.py
+class ConsumerPlugin:
+    """Base class for plugins that run during document consumption"""
+
+# Predefined plugins:
+# - AsnCheckPlugin: Extract ASN from filename/content
+# - BarcodePlugin: Detect barcode-separated multi-page docs
+# - WorkflowTriggerPlugin: Evaluate matching rules
+```
+Custom plugins can be added; registered in `settings.CONSUMER_PLUGINS_MODULES`.
+
+### Matching Algorithms
+Models support multiple match strategies (MatchingModel):
+- `MATCH_LITERAL`: Exact string match
+- `MATCH_REGEX`: Python regex (`documents/regex.py` has helper)
+- `MATCH_FUZZY`: RapidFuzz similarity
+- `MATCH_ANY`/`MATCH_ALL`: Logical combinations
+- `MATCH_AUTO`: AI-assisted (uses embeddings if available)
+
+Used in: Tags, Correspondents, AutoMatch rules during consumption.
+
+### Frontend Service Layer
+Each resource has a service (e.g., `src-ui/src/app/services/rest/documents.service.ts`):
+```typescript
+// Typed HttpClient wrappers with interceptors
+DocumentService.getDocuments(query?: DocumentQuery): Observable<Page<Document>>
+DocumentService.getDocument(id: number): Observable<Document>
+DocumentService.updateDocument(id: number, doc: Partial<Document>): Observable<Document>
+```
+Services live in `src-ui/src/app/services/` + `src-ui/src/app/services/rest/`. Use DI patterns; avoid direct HTTP calls.
+
+## File Navigation Reference
+
+**Backend Entry Points:**
+- `src/manage.py`: Django CLI
+- `src/paperless/urls.py`: Route definitions
+- `src/documents/views.py`: All API endpoints (>5000 lines, search by ViewSet name)
+- `src/documents/models.py`: Core data models (Document, Tag, Correspondent, etc.)
+- `src/documents/tasks.py`: Long-running Celery tasks
+- `src/documents/consumer.py`: Document intake orchestrator
+
+**Frontend Entry Points:**
+- `src-ui/src/main.ts`: Bootstrap
+- `src-ui/src/app/app.module.ts`: Main app module + i18n setup
+- `src-ui/src/app/app.component.ts`: Root component
+- `src-ui/src/app/services/rest/`: Generated API clients
+
+**Config:**
+- `src/paperless/settings/__init__.py`: Django settings (environment variables via `get_*_from_env` helpers)
+- `src-ui/angular.json`: Build config, i18n locales
+- `pyproject.toml`: Python dependencies, pytest config, mypy setup
+- `src-ui/package.json`: npm/pnpm scripts
+- `Dockerfile` + `docker/compose/`: Container definitions
+
+**Testing:**
+- `src/documents/tests/`: Pytest test suite with fixtures (factories in `conftest.py`)
+- `src-ui/e2e/`: Playwright tests
+- `src-ui/src/**/*.spec.ts`: Jest unit tests
+
+## Common Workflows
+
+1. **Add a Document Metadata Field**:
+   - Model in `documents/models.py` (add field to Document class)
+   - Serializer in `documents/serialisers.py` (add to DocumentSerializer)
+   - API auto-exposed via DocumentViewSet
+   - Frontend: Update `Document` interface in `src-ui/src/app/data/paperless.ts`
+
+2. **Add a New Celery Task**:
+   - Define in `documents/tasks.py` with `@shared_task` decorator
+   - Return `PaperlessTask.TaskType` enum in signal handler
+   - Signal handlers in `documents/signals/handlers.py` track lifecycle
+   - Frontend polls `PaperlessTask` list view for progress
+
+3. **Add an API Endpoint**:
+   - Create ViewSet method or subclass in `documents/views.py`
+   - Use `@extend_schema` for OpenAPI metadata
+   - Add serializer in `documents/serialisers.py`
+   - Frontend calls via service in `src-ui/src/app/services/rest/`
+
+4. **Run Integration Tests**:
+   - Requires services: `docker/scripts/start_services.sh`
+   - Then: `pytest -m live` (compiles all markers)
+   - Coverage report auto-generated as `htmlcov/index.html`
+
+## Translation & Internationalization
+
+- **Backend**: Django `.po` files in `src/locale/` (managed via Crowdin)
+- **Frontend**: XLF files in `src-ui/messages.xlf` + Angular i18n
+- **Adding Language**: Requires updates to `angular.json`, `src/paperless/settings.py`, `src-ui/src/app/services/settings.service.ts`, and `src-ui/src/app/app.module.ts` (in alphabetical order, `en-us` first)
+
+## Performance Considerations
+
+- **Indexing**: Tantivy is single-threaded; large document count may require custom tuning
+- **Vector Embeddings**: GPU acceleration available via PyTorch; CPU fallback via `llama-index-embeddings-huggingface`
+- **Celery Concurrency**: Controlled by `PAPERLESS_TASK_WORKERS` env var (default 1); increase cautiously
+- **Database**: PostgreSQL recommended; SQLite limited to single-process dev
+
+## Important Notes
+
+- **Pre-commit Hooks**: Auto-rename long lines + enforce ruff formatting; commit may fail until issues are fixed
+- **AI-Generated Code**: Policy allows AI during PR development but requires attribution; full AI PRs rejected
+- **Feature PRs**: Must reference GitHub discussion/issue to show community interest
+- **Non-Trivial PRs**: Require ≥2 team approvals (check CONTRIBUTING.md for review process)
+

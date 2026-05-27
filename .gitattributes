@@ -1,0 +1,43 @@
+# Paperless-NGX .gitattributes
+# Forces LF line endings for files that run inside Docker/Linux containers.
+# Without this, Windows Git (core.autocrlf=true) injects \r into shebangs,
+# causing  env: 'python3\r': No such file or directory  at build time.
+
+# Default: detect text files and normalise to LF in the repo
+* text=auto eol=lf
+
+# Explicitly LF — scripts, configs, source that runs on Linux
+*.py        text eol=lf
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile* text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+*.conf      text eol=lf
+*.env       text eol=lf
+*.po        text eol=lf
+*.pot       text eol=lf
+*.ts        text eol=lf
+*.html      text eol=lf
+*.scss      text eol=lf
+*.css       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.xml       text eol=lf
+*.xlf       text eol=lf
+
+# Binaries — never touch line endings
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.whl       binary
+*.gz        binary
+*.zip       binary
+*.pdf       binary
+

@@ -1,0 +1,30 @@
+﻿[
+    {
+        "name":  "backend",
+        "pid":  44780,
+        "started":  "2026-05-26T15:21:18",
+        "cwd":  "C:\\GIT\\Side Development\\bandalore-paperless-ngx\\src",
+        "command":  "uv run manage.py runserver"
+    },
+    {
+        "name":  "consumer",
+        "pid":  43144,
+        "started":  "2026-05-26T15:21:18",
+        "cwd":  "C:\\GIT\\Side Development\\bandalore-paperless-ngx\\src",
+        "command":  "uv run manage.py document_consumer"
+    },
+    {
+        "name":  "celery",
+        "pid":  44036,
+        "started":  "2026-05-26T15:21:18",
+        "cwd":  "C:\\GIT\\Side Development\\bandalore-paperless-ngx\\src",
+        "command":  "uv run celery --app paperless worker -l DEBUG"
+    },
+    {
+        "name":  "frontend",
+        "pid":  45036,
+        "started":  "2026-05-26T15:21:18",
+        "cwd":  "C:\\GIT\\Side Development\\bandalore-paperless-ngx\\src-ui",
+        "command":  "if (!(Test-Path -LiteralPath node_modules)) { pnpm install }; pnpm ng serve"
+    }
+]
